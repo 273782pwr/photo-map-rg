@@ -59,9 +59,9 @@ def get_sql_connection():
 
     credential = DefaultAzureCredential(exclude_interactive_browser_credential=True)
     token = credential.get_token("https://database.windows.net/.default").token
-    access_token = bytes(token, 'utf-8')
+    access_token = token.encode("utf-16-le")
 
-    conn_str = f"DRIVER={driver};SERVER={server};DATABASE={database};Encrypt=yes;TrustServerCertificate=no;Authentication=ActiveDirectoryAccessToken;"
+    conn_str = f"DRIVER={driver};SERVER={server};DATABASE={database};Encrypt=yes;TrustServerCertificate=no;Authentication=ActiveDirectoryMsi;Connection Timeout=30;"
 
     return pyodbc.connect(conn_str, attrs_before={1256: access_token})
 
