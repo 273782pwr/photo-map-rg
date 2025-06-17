@@ -1,4 +1,4 @@
-treamlit
+streamlit
 streamlit-folium
 folium
 pandas
