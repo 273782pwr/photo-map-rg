@@ -140,24 +140,26 @@ def save_photo_metadata(filename, latitude, longitude, blob_url, date_taken=None
 
 
 def execute_sql_query(query):
-    server = os.getenv("SQL_SERVER")
-    database = os.getenv("SQL_DATABASE")
-    driver = '{ODBC Driver 18 for SQL Server}'
+    try:
+        server = os.getenv("SQL_SERVER")
+        database = os.getenv("SQL_DATABASE")
+        driver = '{ODBC Driver 18 for SQL Server}'
 
-    # pobierz token
-    credential = DefaultAzureCredential()
-    token = credential.get_token("https://database.windows.net/.default").token
+        # pobierz token
+        credential = DefaultAzureCredential()
+        token = credential.get_token("https://database.windows.net/.default").token
 
-    conn_str = (
-        f"DRIVER={driver};"
-        f"SERVER={server};"
-        f"DATABASE={database};"
-        "Encrypt=yes;TrustServerCertificate=no;Connection Timeout=30;"
-    )
+        conn_str = (
+            f"DRIVER={driver};"
+            f"SERVER={server};"
+            f"DATABASE={database};"
+            "Encrypt=yes;TrustServerCertificate=no;Connection Timeout=30;"
+        )
 
-    with pyodbc.connect(conn_str, attrs_before={1256: bytes(token, "utf-8")}) as conn:
-        df = pd.read_sql(query, conn)
-    return df
+        with pyodbc.connect(conn_str, attrs_before={1256: bytes(token, "utf-8")}) as conn:
+            df = pd.read_sql(query, conn)
+        return df
+
     except Exception as e:
         st.error(f"Błąd wykonania zapytania: {str(e)}")
         return None
