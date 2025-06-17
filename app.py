@@ -111,8 +111,13 @@ def save_photo_metadata(filename, latitude, longitude, blob_url, date_taken=None
     credential = DefaultAzureCredential()
     token = credential.get_token("https://database.windows.net/.default").token
 
-    conn_str = f"DRIVER={driver};SERVER={server};DATABASE={database};Authentication=ActiveDirectoryAccessToken;Encrypt=yes;TrustServerCertificate=no;Connection Timeout=30;"
-
+    conn_str = (
+        'DRIVER={ODBC Driver 18 for SQL Server};'
+        f'SERVER={server};DATABASE={database};'
+        'Authentication=ActiveDirectoryMsi;'
+        'Encrypt=yes;TrustServerCertificate=no;Connection Timeout=30;'
+    )
+    
     with pyodbc.connect(conn_str, attrs_before={1256: bytes(token, "utf-8")}) as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -143,8 +148,12 @@ def execute_sql_query(query):
     credential = DefaultAzureCredential()
     token = credential.get_token("https://database.windows.net/.default").token
 
-    conn_str = f"DRIVER={driver};SERVER={server};DATABASE={database};Authentication=ActiveDirectoryAccessToken;Encrypt=yes;TrustServerCertificate=no;Connection Timeout=30;"
-
+    conn_str = (
+        'DRIVER={ODBC Driver 18 for SQL Server};'
+        f'SERVER={server};DATABASE={database};'
+        'Authentication=ActiveDirectoryMsi;'
+        'Encrypt=yes;TrustServerCertificate=no;Connection Timeout=30;'
+    )
     try:
         with pyodbc.connect(conn_str, attrs_before={1256: bytes(token, "utf-8")}) as conn:
             df = pd.read_sql(query, conn)
