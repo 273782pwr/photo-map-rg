@@ -139,8 +139,9 @@ if "current_page" not in st.session_state:
     st.session_state.current_page = "map"
 if "clicked_location" not in st.session_state:
     st.session_state.clicked_location = None
-if "selected_photo_id" not in st.session_state:
-    st.session_state.selected_photo_id = None
+# Zmieniamy nazwę w session_state, aby była bardziej jednoznaczna
+if "selected_photo_from_map" not in st.session_state:
+    st.session_state.selected_photo_from_map = None
 
 # Nawigacja
 col1, col2, col3 = st.columns(3)
@@ -154,8 +155,9 @@ if col3.button("📋 Galeria zdjęć", use_container_width=True):
     st.session_state.current_page = "list"
     st.rerun()
 
-# --- Strona Przesyłania (bez większych zmian) ---
+# --- Strona Przesyłania (bez zmian) ---
 if st.session_state.current_page == "upload":
+    # ... (kod tej sekcji pozostaje bez zmian)
     st.subheader("Prześlij nowe zdjęcie")
     uploaded_file = st.file_uploader("Wybierz zdjęcie (jpg/jpeg)", type=["jpg", "jpeg"])
     if uploaded_file:
@@ -192,113 +194,104 @@ if st.session_state.current_page == "upload":
         else:
             st.info("Oczekuję na wybór lokalizacji na mapie...")
 
-# --- Strona Mapy (duże zmiany) ---
+
+# --- Strona Mapy (poprawiona logika) ---
 elif st.session_state.current_page == "map":
     st.subheader("Mapa zdjęć")
     df = execute_sql_query("SELECT id, filename, latitude, longitude, blob_url, date_taken, upload_time FROM dbo.photos ORDER BY upload_time DESC")
 
     if not df.empty:
+        # Przechowujemy dane w stanie sesji, aby nie odpytywać bazy przy każdym rerunie
+        st.session_state.map_df = df
+        
         map_col, preview_col = st.columns([2, 1])
 
         with map_col:
-            # Utwórz mapę tylko raz i przechowaj w stanie sesji, aby uniknąć przeładowań
-            if 'map' not in st.session_state:
-                 st.session_state.map = folium.Map(location=[df['latitude'].mean(), df['longitude'].mean()], zoom_start=6)
-                 for _, row in df.iterrows():
-                    # <<< NAPRAWA 1: Uproszczony popup i dodana ikona kamery
-                    folium.Marker(
-                        [row['latitude'], row['longitude']],
-                        tooltip=row['filename'],  # Tooltip (podpowiedź) jest lepszy niż popup
-                        icon=folium.Icon(color="blue", icon="camera", prefix="fa")
-                    ).add_to(st.session_state.map)
+            m = folium.Map(location=[df['latitude'].mean(), df['longitude'].mean()], zoom_start=6)
+            for _, row in df.iterrows():
+                folium.Marker(
+                    [row['latitude'], row['longitude']],
+                    tooltip=row['filename'],
+                    icon=folium.Icon(color="blue", icon="camera", prefix="fa")
+                ).add_to(m)
 
-            # Wyświetl mapę i przechwyć kliknięcia
-            map_data = st_folium(
-                st.session_state.map,
-                height=600,
-                use_container_width=True,
-                returned_objects=["last_object_clicked_tooltip"]
-            )
+            # <<< NAPRAWA 1: Zapisujemy output do zmiennej i przetwarzamy go od razu
+            map_data = st_folium(m, height=600, use_container_width=True, returned_objects=["last_object_clicked_tooltip"])
 
-            # <<< NAPRAWA 2: Logika zapobiegająca migotaniu (pętli rerun)
             if map_data and map_data.get("last_object_clicked_tooltip"):
                 clicked_filename = map_data["last_object_clicked_tooltip"]
-                # Znajdź ID klikniętego zdjęcia
-                selected_row = df[df['filename'] == clicked_filename].iloc[0]
-                newly_selected_id = int(selected_row['id'])
+                selected_row = df[df['filename'] == clicked_filename]
+                if not selected_row.empty:
+                    # Przechowujemy cały wiersz (jako słownik) w stanie sesji
+                    st.session_state.selected_photo_from_map = selected_row.iloc[0].to_dict()
 
-                # Uruchom ponownie tylko, jeśli wybrano inne zdjęcie
-                if st.session_state.get('selected_photo_id') != newly_selected_id:
-                    st.session_state.selected_photo_id = newly_selected_id
-                    st.rerun()
-
-        # <<< NAPRAWA 3: Panel podglądu zdjęcia działa teraz poprawnie
         with preview_col:
             st.subheader("Podgląd zdjęcia")
-            if st.session_state.selected_photo_id is not None:
-                # Pobierz dane wybranego zdjęcia z DataFrame
-                photo_data = df[df['id'] == st.session_state.selected_photo_id].iloc[0]
-                st.image(photo_data['blob_url'], caption=photo_data['filename'], use_column_width=True)
-                st.write(f"**Nazwa pliku:** {photo_data['filename']}")
-                date_str = photo_data['date_taken'].strftime('%Y-%m-%d %H:%M:%S') if pd.notnull(photo_data['date_taken']) else 'Brak danych'
-                st.write(f"**Data wykonania:** {date_str}")
-                st.write(f"**Współrzędne:** {photo_data['latitude']:.6f}, {photo_data['longitude']:.6f}")
-                st.markdown(f"[Otwórz w nowej karcie]({photo_data['blob_url']})", unsafe_allow_html=True)
+            # <<< NAPRAWA 2: Sprawdzamy, czy dane zdjęcia są w stanie sesji
+            if st.session_state.selected_photo_from_map:
+                photo_data = st.session_state.selected_photo_from_map
+                # Upewniamy się, że URL jest stringiem
+                photo_url = str(photo_data.get('blob_url', ''))
+                
+                if photo_url:
+                    # Używamy poprawnego parametru use_container_width
+                    st.image(photo_url, caption=photo_data.get('filename'), use_container_width=True)
+                    st.write(f"**Nazwa pliku:** {photo_data.get('filename')}")
+                    date_str = photo_data.get('date_taken').strftime('%Y-%m-%d %H:%M:%S') if pd.notnull(photo_data.get('date_taken')) else 'Brak danych'
+                    st.write(f"**Data wykonania:** {date_str}")
+                    st.write(f"**Współrzędne:** {photo_data.get('latitude'):.6f}, {photo_data.get('longitude'):.6f}")
+                    st.markdown(f"[Otwórz w nowej karcie]({photo_url})", unsafe_allow_html=True)
+                else:
+                    st.warning("Nie można załadować podglądu zdjęcia (brak URL).")
             else:
                 st.info("Kliknij na znacznik (kamerę) na mapie, aby zobaczyć szczegóły zdjęcia.")
     else:
         st.info("Brak zdjęć w bazie danych. Prześlij pierwsze zdjęcie!")
 
-# --- Strona Galerii (duże zmiany) ---
+# --- Strona Galerii (poprawiona) ---
 elif st.session_state.current_page == "list":
     st.subheader("Galeria zdjęć z filtrowaniem")
-
-    # <<< NAPRAWA 4: Interaktywne filtry wykonujące zapytania do SQL
     st.write("Użyj filtrów, aby zawęzić wyniki. Wyniki są sortowane od najnowszych.")
     
-    # Utwórz kolumny dla filtrów
     filter_col1, filter_col2 = st.columns(2)
     with filter_col1:
         search_term = st.text_input("Szukaj po nazwie pliku:")
     with filter_col2:
-        # Użyj krotki do przekazania zakresu dat
         date_range = st.date_input("Filtruj po dacie wykonania:", value=())
 
-    # Dynamiczne budowanie zapytania SQL
     base_query = "SELECT filename, latitude, longitude, blob_url, date_taken FROM dbo.photos WHERE 1=1"
     params = []
-
     if search_term:
         base_query += " AND filename LIKE ?"
         params.append(f"%{search_term}%")
-    
     if len(date_range) == 2:
         start_date, end_date = date_range
-        # Dołącz czas, aby objąć cały dzień
         start_datetime = datetime.combine(start_date, time.min)
         end_datetime = datetime.combine(end_date, time.max)
         base_query += " AND date_taken BETWEEN ? AND ?"
         params.append(start_datetime)
         params.append(end_datetime)
-
     base_query += " ORDER BY date_taken DESC"
     
-    # Wykonaj zbudowane zapytanie
     df = execute_sql_query(base_query, params=params)
 
     if not df.empty:
-        # <<< NAPRAWA 5: Wyświetlanie zdjęć w siatce za pomocą kolumn Streamlit
         st.write(f"Znaleziono: {len(df)} zdjęć.")
         
-        # Twórz siatkę po 3 zdjęcia w rzędzie
         for i in range(0, len(df), 3):
             cols = st.columns(3)
             for j in range(3):
                 if i + j < len(df):
                     with cols[j]:
                         row = df.iloc[i + j]
-                        with st.container(): # Użyj kontenera dla lepszego stylu
-                            st.image(row['blob_url'], caption=f"Lat: {row['latitude']:.2f}, Lon: {row['longitude']:.2f}", use_column_width=True)
+                        with st.container():
+                            # <<< NAPRAWA 3: Poprawne użycie st.image i sprawdzenie typu
+                            photo_url = str(row['blob_url'])
+                            st.image(
+                                photo_url,
+                                caption=f"Lat: {row['latitude']:.2f}, Lon: {row['longitude']:.2f}",
+                                use_container_width=True # Poprawny parametr
+                            )
                             st.write(f"**{row['filename']}**")
                             date_str = row['date_taken'].strftime('%Y-%m-%d') if pd.notnull(row['date_taken']) else 'Brak daty'
                             st.caption(f"Data: {date_str}")
