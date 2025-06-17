@@ -12,7 +12,7 @@ from azure.identity import DefaultAzureCredential
 from azure.storage.blob import BlobServiceClient
 from datetime import datetime
 from dotenv import load_dotenv
-import struct  # <<< KROK 1: Zaimportuj moduł struct
+import struct
 
 load_dotenv()
 
@@ -42,7 +42,6 @@ def convert_to_degrees(value, ref):
         degrees = -degrees
     return degrees
 
-
 def get_exif_data(uploaded_file):
     try:
         img = ExifImage(uploaded_file)
@@ -62,7 +61,6 @@ def get_exif_data(uploaded_file):
     except Exception:
         return {'date_taken': None, 'coordinates': None}
 
-
 def upload_photo_to_blob(file_bytes, filename):
     container_name = os.getenv("CONTAINER_NAME", "photos")
     connect_str = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
@@ -78,9 +76,7 @@ def upload_photo_to_blob(file_bytes, filename):
         st.error(f"Błąd podczas przesyłania do Blob Storage: {e}")
         return None
 
-# <<< KROK 2: Stwórz funkcję do nawiązywania połączenia z SQL DB, aby uniknąć powtórzeń
 def get_sql_connection():
-    """Nawiązuje połączenie z Azure SQL DB używając Managed Identity."""
     server = os.getenv("SQL_SERVER")
     database = os.getenv("SQL_DATABASE")
     driver = '{ODBC Driver 18 for SQL Server}'
@@ -93,8 +89,6 @@ def get_sql_connection():
         credential = DefaultAzureCredential(exclude_interactive_browser_credential=False)
         token_object = credential.get_token("https://database.windows.net/.default")
         token_bytes = token_object.token.encode("UTF-16-LE")
-        
-        # <<< KROK 3: Prawidłowo spakuj token do struktury binarnej
         token_struct = struct.pack(f"=I{len(token_bytes)}s", len(token_bytes), token_bytes)
 
         conn_str = (
@@ -108,21 +102,22 @@ def get_sql_connection():
         return conn
     except Exception as e:
         st.error(f"Błąd połączenia z bazą danych: {e}")
-        # Wypisz bardziej szczegółowe informacje w konsoli dla dewelopera
         print(f"Szczegóły błędu połączenia z bazą: {e}")
         return None
 
-def save_photo_metadata(filename, latitude, longitude, blob_url, date_taken=None):
+# <<< ZMIANA 1: Nowa funkcja do inicjalizacji bazy danych
+def initialize_database():
+    """Sprawdza, czy tabela 'photos' istnieje, a jeśli nie, tworzy ją."""
     conn = get_sql_connection()
     if conn:
         with conn:
             cursor = conn.cursor()
-            # Użyj jednego zapytania do sprawdzenia i wstawienia danych
-            # Ta składnia z IF NOT EXISTS... CREATE TABLE działa w SQL Server
+            # Użycie `OBJECT_ID` jest standardowym sposobem w SQL Server na sprawdzenie istnienia obiektu.
+            # `U` oznacza tabelę użytkownika. Dodajemy `dbo.` jako dobrą praktykę.
             cursor.execute("""
               IF OBJECT_ID('dbo.photos', 'U') IS NULL
               BEGIN
-                CREATE TABLE photos (
+                CREATE TABLE dbo.photos (
                   id INT IDENTITY(1,1) PRIMARY KEY,
                   filename NVARCHAR(255),
                   latitude FLOAT,
@@ -133,8 +128,16 @@ def save_photo_metadata(filename, latitude, longitude, blob_url, date_taken=None
                 );
               END
             """)
+            conn.commit()
+            print("Database initialized successfully. 'photos' table is ready.")
+
+def save_photo_metadata(filename, latitude, longitude, blob_url, date_taken=None):
+    conn = get_sql_connection()
+    if conn:
+        with conn:
+            cursor = conn.cursor()
             cursor.execute("""
-              INSERT INTO photos(filename, latitude, longitude, blob_url, date_taken)
+              INSERT INTO dbo.photos (filename, latitude, longitude, blob_url, date_taken)
               VALUES (?, ?, ?, ?, ?);
             """, filename, latitude, longitude, blob_url, date_taken)
             conn.commit()
@@ -145,14 +148,23 @@ def execute_sql_query(query, params=None):
     conn = get_sql_connection()
     if conn:
         with conn:
-            df = pd.read_sql(query, conn, params=params)
-            return df
-    return pd.DataFrame() # Zwróć pusty DataFrame w przypadku błędu
+            try:
+                # Dodano `dbo.` dla pewności, chociaż domyślnie powinno działać.
+                df = pd.read_sql(query.replace("FROM photos", "FROM dbo.photos"), conn, params=params)
+                return df
+            except pyodbc.Error as e:
+                # Jeśli błąd nadal występuje, wyświetl go
+                st.error(f"Błąd wykonania zapytania SQL: {e}")
+                return pd.DataFrame()
+    return pd.DataFrame()
 
+
+# <<< ZMIANA 2: Wywołaj funkcję inicjalizującą na starcie aplikacji
+initialize_database()
 
 # --- Stan sesji ---
 if "current_page" not in st.session_state:
-    st.session_state.current_page = "map" # Domyślnie mapa
+    st.session_state.current_page = "map"
 if "clicked_location" not in st.session_state:
     st.session_state.clicked_location = None
 if "selected_photo_id" not in st.session_state:
@@ -170,7 +182,8 @@ if col3.button("📋 Galeria zdjęć", use_container_width=True):
     st.session_state.current_page = "list"
     st.rerun()
 
-# --- Strony aplikacji ---
+
+# --- Strony aplikacji (reszta kodu bez zmian) ---
 
 if st.session_state.current_page == "upload":
     st.subheader("Prześlij nowe zdjęcie")
@@ -178,7 +191,7 @@ if st.session_state.current_page == "upload":
 
     if uploaded_file:
         st.image(uploaded_file, caption="Podgląd zdjęcia", use_container_width=True)
-        file_bytes = uploaded_file.getvalue() # Odczytaj bajty raz
+        file_bytes = uploaded_file.getvalue()
         exif_data = get_exif_data(file_bytes)
         lat, lon = exif_data['coordinates'] if exif_data['coordinates'] else (None, None)
         date_taken = exif_data['date_taken']
@@ -193,7 +206,6 @@ if st.session_state.current_page == "upload":
             st.warning("Nie znaleziono danych GPS w EXIF. Wybierz lokalizację klikając na mapie.")
             m = folium.Map(location=[52, 19], zoom_start=6)
             
-            # Dodaj marker, jeśli lokalizacja została już kliknięta
             if st.session_state.clicked_location:
                 folium.Marker(
                     [st.session_state.clicked_location["lat"], st.session_state.clicked_location["lng"]],
@@ -217,7 +229,7 @@ if st.session_state.current_page == "upload":
                     if blob_url:
                         if save_photo_metadata(uploaded_file.name, lat, lon, blob_url, date_taken):
                             st.success(f"Zdjęcie zostało pomyślnie zapisane!")
-                            st.session_state.clicked_location = None # Resetuj kliknięcie
+                            st.session_state.clicked_location = None
                         else:
                             st.error("Nie udało się zapisać metadanych zdjęcia w bazie.")
         else:
@@ -225,7 +237,8 @@ if st.session_state.current_page == "upload":
 
 
 elif st.session_state.current_page == "map":
-    df = execute_sql_query("SELECT id, filename, latitude, longitude, blob_url, date_taken, upload_time FROM photos ORDER BY upload_time DESC")
+    # W zapytaniu używamy `dbo.photos` dla spójności
+    df = execute_sql_query("SELECT id, filename, latitude, longitude, blob_url, date_taken, upload_time FROM dbo.photos ORDER BY upload_time DESC")
 
     if not df.empty:
         map_col, preview_col = st.columns([2, 1])
@@ -235,17 +248,11 @@ elif st.session_state.current_page == "map":
             m = folium.Map(location=[df['latitude'].mean(), df['longitude'].mean()], zoom_start=6)
             
             for _, row in df.iterrows():
-                popup_html = f"""
-                <div style="width: 200px;">
-                    <h5 style="margin:0;">{row['filename']}</h5>
-                    <img src="{row['blob_url']}" style="width:100%;">
-                </div>
-                """
+                popup_html = f"""<div style="width: 200px;"><h5 style="margin:0;">{row['filename']}</h5><img src="{row['blob_url']}" style="width:100%;"></div>"""
                 folium.Marker(
                     [row['latitude'], row['longitude']],
                     popup=folium.Popup(popup_html, max_width=250),
                     tooltip=row['filename'],
-                    # Przekazanie ID w obiekcie, niestety st_folium tego nie zwraca
                 ).add_to(m)
 
             map_data = st_folium(m, height=600, use_container_width=True, returned_objects=["last_object_clicked_tooltip"])
@@ -273,7 +280,7 @@ elif st.session_state.current_page == "map":
 
 elif st.session_state.current_page == "list":
     st.subheader("Galeria zdjęć")
-    df = execute_sql_query("SELECT filename, latitude, longitude, blob_url, date_taken FROM photos ORDER BY date_taken DESC")
+    df = execute_sql_query("SELECT filename, latitude, longitude, blob_url, date_taken FROM dbo.photos ORDER BY date_taken DESC")
     if not df.empty:
         for _, row in df.iterrows():
             st.markdown(f"""
