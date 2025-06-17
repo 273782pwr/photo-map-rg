@@ -1,0 +1,11 @@
+treamlit
+streamlit-folium
+folium
+pandas
+Pillow
+exif
+pyodbc
+azure-identity
+azure-storage-blob
+python-dotenv
+requests
