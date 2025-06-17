@@ -112,29 +112,28 @@ def save_photo_metadata(filename, latitude, longitude, blob_url, date_taken=None
     token = credential.get_token("https://database.windows.net/.default").token
 
     conn_str = (
-        'DRIVER={ODBC Driver 18 for SQL Server};'
-        f'SERVER={server};DATABASE={database};'
-        'Authentication=ActiveDirectoryMsi;'
-        'Encrypt=yes;TrustServerCertificate=no;Connection Timeout=30;'
+        f"DRIVER={driver};"
+        f"SERVER={server};"
+        f"DATABASE={database};"
+        "Encrypt=yes;TrustServerCertificate=no;Connection Timeout=30;"
     )
     
     with pyodbc.connect(conn_str, attrs_before={1256: bytes(token, "utf-8")}) as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            IF NOT EXISTS (
-                SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'photos'
-            )
+          IF NOT EXISTS (
+            SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME='photos'
+          )
             CREATE TABLE photos (
-                id UNIQUEIDENTIFIER DEFAULT NEWID() PRIMARY KEY,
-                filename NVARCHAR(255),
-                latitude FLOAT,
-                longitude FLOAT,
-                blob_url NVARCHAR(2083),
-                date_taken DATETIME,
-                upload_time DATETIME DEFAULT GETDATE()
+              id UNIQUEIDENTIFIER DEFAULT NEWID() PRIMARY KEY,
+              filename NVARCHAR(255),
+              latitude FLOAT,
+              longitude FLOAT,
+              blob_url NVARCHAR(2083),
+              date_taken DATETIME,
+              upload_time DATETIME DEFAULT GETDATE()
             );
-
-            INSERT INTO photos (filename, latitude, longitude, blob_url, date_taken)
+          INSERT INTO photos(filename, latitude, longitude, blob_url, date_taken)
             VALUES (?, ?, ?, ?, ?);
         """, filename, latitude, longitude, blob_url, date_taken)
         conn.commit()
@@ -145,19 +144,20 @@ def execute_sql_query(query):
     database = os.getenv("SQL_DATABASE")
     driver = '{ODBC Driver 18 for SQL Server}'
 
+    # pobierz token
     credential = DefaultAzureCredential()
     token = credential.get_token("https://database.windows.net/.default").token
 
     conn_str = (
-        'DRIVER={ODBC Driver 18 for SQL Server};'
-        f'SERVER={server};DATABASE={database};'
-        'Authentication=ActiveDirectoryMsi;'
-        'Encrypt=yes;TrustServerCertificate=no;Connection Timeout=30;'
+        f"DRIVER={driver};"
+        f"SERVER={server};"
+        f"DATABASE={database};"
+        "Encrypt=yes;TrustServerCertificate=no;Connection Timeout=30;"
     )
-    try:
-        with pyodbc.connect(conn_str, attrs_before={1256: bytes(token, "utf-8")}) as conn:
-            df = pd.read_sql(query, conn)
-        return df
+
+    with pyodbc.connect(conn_str, attrs_before={1256: bytes(token, "utf-8")}) as conn:
+        df = pd.read_sql(query, conn)
+    return df
     except Exception as e:
         st.error(f"Błąd wykonania zapytania: {str(e)}")
         return None
