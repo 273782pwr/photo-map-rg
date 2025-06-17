@@ -145,7 +145,6 @@ def execute_sql_query(query):
         database = os.getenv("SQL_DATABASE")
         driver = '{ODBC Driver 18 for SQL Server}'
 
-        # pobierz token
         credential = DefaultAzureCredential()
         token = credential.get_token("https://database.windows.net/.default").token
 
@@ -156,13 +155,14 @@ def execute_sql_query(query):
             "Encrypt=yes;TrustServerCertificate=no;Connection Timeout=30;"
         )
 
-        with pyodbc.connect(conn_str, attrs_before={1256: bytes(token, "utf-8")}) as conn:
+        with pyodbc.connect(conn_str, attrs_before={1256: token.encode('utf-8')}) as conn:
             df = pd.read_sql(query, conn)
         return df
 
     except Exception as e:
         st.error(f"Błąd wykonania zapytania: {str(e)}")
         return None
+
 
 
 # --- Stan sesji ---
