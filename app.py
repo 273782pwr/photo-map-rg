@@ -9,10 +9,11 @@ from io import BytesIO
 import os
 import pyodbc
 from azure.identity import DefaultAzureCredential
-from azure.storage.blob import BlobServiceClient
-from datetime import datetime, time
+from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPermissions
+from datetime import datetime, time, timedelta
 from dotenv import load_dotenv
 import struct
+from urllib.parse import urlparse
 
 load_dotenv()
 
@@ -38,7 +39,7 @@ st.markdown("""
 st.title("🗺️ Mapa zdjęć")
 
 
-# --- Funkcje pomocnicze (bez zmian) ---
+# --- Funkcje pomocnicze ---
 def convert_to_degrees(value, ref):
     degrees = value[0] + value[1] / 60 + value[2] / 3600
     if ref in ['S', 'W']:
@@ -77,21 +78,76 @@ def upload_photo_to_blob(file_bytes, filename):
     except Exception as e:
         st.error(f"Błąd Blob Storage: {e}")
         return None
+        
+# <<< NOWA FUNKCJA DO GENEROWANIA SAS TOKENU >>>
+@st.cache_data(ttl=3600) # Cache'ujemy linki SAS na godzinę, aby nie generować ich przy każdym rerunie
+def get_blob_with_sas(blob_url: str):
+    """Generuje URL z tokenem SAS dla prywatnego bloba."""
+    if not blob_url:
+        return None
+        
+    connect_str = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
+    if not connect_str:
+        st.error("Brak AZURE_STORAGE_CONNECTION_STRING do wygenerowania SAS.")
+        return None
+
+    try:
+        url_parts = urlparse(blob_url)
+        account_name = url_parts.netloc.split('.')[0]
+        # Ścieżka będzie wyglądać np. /kontener/nazwapliku.jpg
+        path_parts = url_parts.path.strip('/').split('/', 1)
+        container_name = path_parts[0]
+        blob_name = path_parts[1]
+
+        # Klucz konta jest potrzebny do wygenerowania SAS z connection stringa
+        blob_service_client = BlobServiceClient.from_connection_string(connect_str)
+        account_key = blob_service_client.credential.account_key
+        
+        sas_token = generate_blob_sas(
+            account_name=account_name,
+            container_name=container_name,
+            blob_name=blob_name,
+            account_key=account_key,
+            permission=BlobSasPermissions(read=True),
+            expiry=datetime.utcnow() + timedelta(hours=1) # Link ważny przez 1 godzinę
+        )
+        
+        return f"{blob_url}?{sas_token}"
+
+    except Exception as e:
+        st.error(f"Błąd generowania SAS: {e}")
+        return None
+
 
 def get_sql_connection():
     server = os.getenv("SQL_SERVER")
     database = os.getenv("SQL_DATABASE")
     driver = '{ODBC Driver 18 for SQL Server}'
+    use_managed_identity = os.getenv("USE_MANAGED_IDENTITY", "false").lower() == "true"
+    
     if not all([server, database]):
         st.error("Brak SQL_SERVER lub SQL_DATABASE.")
         return None
+
     try:
-        credential = DefaultAzureCredential(exclude_interactive_browser_credential=False)
-        token_object = credential.get_token("https://database.windows.net/.default")
-        token_bytes = token_object.token.encode("UTF-16-LE")
-        token_struct = struct.pack(f"=I{len(token_bytes)}s", len(token_bytes), token_bytes)
-        conn_str = f"DRIVER={driver};SERVER={server};DATABASE={database};Encrypt=yes;TrustServerCertificate=no;Connection Timeout=30;"
-        conn = pyodbc.connect(conn_str, attrs_before={1256: token_struct})
+        # Logika dla Managed Identity (w Azure)
+        if use_managed_identity:
+            credential = DefaultAzureCredential(exclude_interactive_browser_credential=False)
+            token_object = credential.get_token("https://database.windows.net/.default")
+            token_bytes = token_object.token.encode("UTF-16-LE")
+            token_struct = struct.pack(f"=I{len(token_bytes)}s", len(token_bytes), token_bytes)
+            conn_str = f"DRIVER={driver};SERVER={server};DATABASE={database};Encrypt=yes;TrustServerCertificate=no;Connection Timeout=30;"
+            conn = pyodbc.connect(conn_str, attrs_before={1256: token_struct})
+        # Logika dla logowania SQL (lokalnie lub gdy nie ma MI)
+        else:
+            username = os.getenv("SQL_USER")
+            password = os.getenv("SQL_PASSWORD")
+            if not all([username, password]):
+                 st.error("Brak SQL_USER lub SQL_PASSWORD dla logowania SQL.")
+                 return None
+            conn_str = f"DRIVER={driver};SERVER={server};DATABASE={database};UID={username};PWD={password};Encrypt=yes;TrustServerCertificate=no;Connection Timeout=30;"
+            conn = pyodbc.connect(conn_str)
+        
         return conn
     except Exception as e:
         st.error(f"Błąd połączenia z bazą: {e}")
@@ -139,7 +195,6 @@ if "current_page" not in st.session_state:
     st.session_state.current_page = "map"
 if "clicked_location" not in st.session_state:
     st.session_state.clicked_location = None
-# Zmieniamy nazwę w session_state, aby była bardziej jednoznaczna
 if "selected_photo_from_map" not in st.session_state:
     st.session_state.selected_photo_from_map = None
 
@@ -155,9 +210,8 @@ if col3.button("📋 Galeria zdjęć", use_container_width=True):
     st.session_state.current_page = "list"
     st.rerun()
 
-# --- Strona Przesyłania (bez zmian) ---
+# --- Strona Przesyłania ---
 if st.session_state.current_page == "upload":
-    # ... (kod tej sekcji pozostaje bez zmian)
     st.subheader("Prześlij nowe zdjęcie")
     uploaded_file = st.file_uploader("Wybierz zdjęcie (jpg/jpeg)", type=["jpg", "jpeg"])
     if uploaded_file:
@@ -195,13 +249,12 @@ if st.session_state.current_page == "upload":
             st.info("Oczekuję na wybór lokalizacji na mapie...")
 
 
-# --- Strona Mapy (poprawiona logika) ---
+# --- Strona Mapy ---
 elif st.session_state.current_page == "map":
     st.subheader("Mapa zdjęć")
     df = execute_sql_query("SELECT id, filename, latitude, longitude, blob_url, date_taken, upload_time FROM dbo.photos ORDER BY upload_time DESC")
 
     if not df.empty:
-        # Przechowujemy dane w stanie sesji, aby nie odpytywać bazy przy każdym rerunie
         st.session_state.map_df = df
         
         map_col, preview_col = st.columns([2, 1])
@@ -214,33 +267,34 @@ elif st.session_state.current_page == "map":
                     tooltip=row['filename'],
                     icon=folium.Icon(color="blue", icon="camera", prefix="fa")
                 ).add_to(m)
-
-            # <<< NAPRAWA 1: Zapisujemy output do zmiennej i przetwarzamy go od razu
             map_data = st_folium(m, height=600, use_container_width=True, returned_objects=["last_object_clicked_tooltip"])
 
             if map_data and map_data.get("last_object_clicked_tooltip"):
                 clicked_filename = map_data["last_object_clicked_tooltip"]
                 selected_row = df[df['filename'] == clicked_filename]
                 if not selected_row.empty:
-                    # Przechowujemy cały wiersz (jako słownik) w stanie sesji
                     st.session_state.selected_photo_from_map = selected_row.iloc[0].to_dict()
 
         with preview_col:
             st.subheader("Podgląd zdjęcia")
-            # <<< NAPRAWA 2: Sprawdzamy, czy dane zdjęcia są w stanie sesji
             if st.session_state.selected_photo_from_map:
                 photo_data = st.session_state.selected_photo_from_map
-                # Upewniamy się, że URL jest stringiem
                 photo_url = str(photo_data.get('blob_url', ''))
                 
                 if photo_url:
-                    # Używamy poprawnego parametru use_container_width
-                    st.image(photo_url, caption=photo_data.get('filename'), use_container_width=True)
-                    st.write(f"**Nazwa pliku:** {photo_data.get('filename')}")
-                    date_str = photo_data.get('date_taken').strftime('%Y-%m-%d %H:%M:%S') if pd.notnull(photo_data.get('date_taken')) else 'Brak danych'
-                    st.write(f"**Data wykonania:** {date_str}")
-                    st.write(f"**Współrzędne:** {photo_data.get('latitude'):.6f}, {photo_data.get('longitude'):.6f}")
-                    st.markdown(f"[Otwórz w nowej karcie]({photo_url})", unsafe_allow_html=True)
+                    # <<< ZMIANA: Generujemy URL z SAS tokenem przed wyświetleniem >>>
+                    with st.spinner("Generowanie bezpiecznego linku..."):
+                        sas_url = get_blob_with_sas(photo_url)
+                    
+                    if sas_url:
+                        st.image(sas_url, caption=photo_data.get('filename'), use_container_width=True)
+                        st.write(f"**Nazwa pliku:** {photo_data.get('filename')}")
+                        date_str = photo_data.get('date_taken').strftime('%Y-%m-%d %H:%M:%S') if pd.notnull(photo_data.get('date_taken')) else 'Brak danych'
+                        st.write(f"**Data wykonania:** {date_str}")
+                        st.write(f"**Współrzędne:** {photo_data.get('latitude'):.6f}, {photo_data.get('longitude'):.6f}")
+                        st.markdown(f"[Otwórz w nowej karcie]({sas_url})", unsafe_allow_html=True)
+                    else:
+                        st.error("Nie udało się wygenerować bezpiecznego linku do zdjęcia.")
                 else:
                     st.warning("Nie można załadować podglądu zdjęcia (brak URL).")
             else:
@@ -248,7 +302,7 @@ elif st.session_state.current_page == "map":
     else:
         st.info("Brak zdjęć w bazie danych. Prześlij pierwsze zdjęcie!")
 
-# --- Strona Galerii (poprawiona) ---
+# --- Strona Galerii ---
 elif st.session_state.current_page == "list":
     st.subheader("Galeria zdjęć z filtrowaniem")
     st.write("Użyj filtrów, aby zawęzić wyniki. Wyniki są sortowane od najnowszych.")
@@ -271,7 +325,7 @@ elif st.session_state.current_page == "list":
         base_query += " AND date_taken BETWEEN ? AND ?"
         params.append(start_datetime)
         params.append(end_datetime)
-    base_query += " ORDER BY date_taken DESC"
+    base_query += " ORDER BY COALESCE(date_taken, upload_time) DESC" # Lepsze sortowanie
     
     df = execute_sql_query(base_query, params=params)
 
@@ -285,13 +339,18 @@ elif st.session_state.current_page == "list":
                     with cols[j]:
                         row = df.iloc[i + j]
                         with st.container():
-                            # <<< NAPRAWA 3: Poprawne użycie st.image i sprawdzenie typu
                             photo_url = str(row['blob_url'])
-                            st.image(
-                                photo_url,
-                                caption=f"Lat: {row['latitude']:.2f}, Lon: {row['longitude']:.2f}",
-                                use_container_width=True # Poprawny parametr
-                            )
+                            # <<< ZMIANA: Generujemy URL z SAS tokenem przed wyświetleniem >>>
+                            sas_url = get_blob_with_sas(photo_url)
+                            if sas_url:
+                                st.image(
+                                    sas_url,
+                                    caption=f"Lat: {row['latitude']:.2f}, Lon: {row['longitude']:.2f}",
+                                    use_container_width=True
+                                )
+                            else:
+                                st.warning("Brak linku do zdjęcia")
+
                             st.write(f"**{row['filename']}**")
                             date_str = row['date_taken'].strftime('%Y-%m-%d') if pd.notnull(row['date_taken']) else 'Brak daty'
                             st.caption(f"Data: {date_str}")
